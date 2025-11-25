@@ -18,7 +18,7 @@ from ultralytics import YOLO # Using YOLOv8/v9 library for detection
 
 # --- Configuration & Setup ---
 DB_FILE = "backend/pothole_reports.json"
-WEIGHTS_PATH = "backend/weights/best.pt" 
+WEIGHTS_PATH = "weights/best.pt" 
 
 # Create directories (only needed for the local weights and DB file)
 os.makedirs("backend/weights", exist_ok=True)
