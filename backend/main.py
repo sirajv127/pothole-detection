@@ -5,7 +5,7 @@ import random
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -77,7 +77,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Core I/O and Processing Functions (Used by Background Task) ---
+# --- Core I/O and Processing Functions ---
 
 def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     """Extracts GPS coordinates (lat, lon) from image bytes (EXIF data)."""
@@ -124,16 +124,17 @@ def save_records(records: List[dict]):
         json.dump(records, f, indent=4)
 
 
-# --- S3 Upload Function (CHANGED TO SYNCHRONOUS for background task compatibility) ---
-def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
+# --- S3 Upload Function (RESTORED TO ASYNCHRONOUS) ---
+async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
     """Uploads file bytes to S3 using blocking boto3 call."""
     if not s3_client:
-        raise RuntimeError("Cloud storage client not initialized.")
+        raise HTTPException(status_code=500, detail="Cloud storage client not initialized.")
         
     s3_key = f"media/{filename}"
     
+    # NOTE: Since boto3 is synchronous, FastAPI will run this in a thread pool.
+    # We keep 'async' for FastAPI compatibility in the route.
     try:
-        # Boto3 calls are synchronous and blocking, safe to call here.
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
             Key=s3_key,
@@ -143,11 +144,11 @@ def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> st
         return s3_key
     except Exception as e:
         print(f"S3 Upload Error: {e}")
-        raise RuntimeError(f"S3 upload failed: {e}") 
+        raise HTTPException(status_code=500, detail=f"S3 upload failed: {e}") 
 
 
 def run_pothole_detection_image(image_bytes: bytes) -> dict:
-    """Runs YOLO inference on a single image (CPU-bound/SLOW)."""
+    """Runs YOLO inference on a single image."""
     global model
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -170,66 +171,20 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
     }
 
 
-# --- NEW HELPER FUNCTION FOR BACKGROUND EXECUTION (HOLDS ALL SLOW WORK) ---
-def execute_full_analysis(
-    image_bytes: bytes, 
-    lat: float, 
-    lon: float, 
-    image_filename: str, 
-    content_type: str,
-    media_type: str
-):
-    """
-    Handles all the slow, CPU-intensive work in a separate thread.
-    This function blocks the thread but ensures the main web server remains responsive.
-    """
-    
-    try:
-        # 1. Upload file to S3 (SLOW I/O)
-        s3_key = upload_file_to_s3(image_bytes, image_filename, content_type) 
-        
-        # 2. Run Detection (SLOW CPU/ML)
-        detection_result = run_pothole_detection_image(image_bytes)
-
-        # 3. Save the final record (DB Save)
-        record = {
-            "latitude": lat,
-            "longitude": lon,
-            "pothole_found": detection_result["pothole_found"],
-            "confidence": detection_result["confidence"],
-            "media_name": image_filename,
-            "media_type": media_type,
-            "media_key": s3_key,
-            "detection_count": detection_result["detection_count"],
-            "date_time": datetime.datetime.now().isoformat()
-        }
-        
-        records = load_records()
-        records.append(record)
-        save_records(records)
-        
-        print(f"Background task SUCCESS: Report for {image_filename} completed and saved to S3.")
-
-    except Exception as e:
-        print(f"Background task FAILED for {image_filename}: {e}")
-        # This failure won't interrupt the user, but it's logged for maintenance.
-
-
-# --- FastAPI Routes ---
+# --- FastAPI Routes (Restored to Blocking/Synchronous Logic) ---
 
 @app.post("/api/upload/image")
 async def upload_image(
-    # FIXED ORDER: Parameters without default values must come first
-    background_tasks: BackgroundTasks, 
-    file: UploadFile = File(...),              
+    file: UploadFile = File(...),
     manual_lat: Optional[float] = Form(None), 
-    manual_lon: Optional[float] = Form(None)   
+    manual_lon: Optional[float] = Form(None)
 ):
     """
-    Handles image upload, schedules detection/upload, and returns instant reply.
+    Handles image upload, detection, and S3 upload. 
+    NOTE: This operation blocks the server until complete (takes 5-6 mins).
     """
     
-    # 1. Read the full file content immediately (needed for both GPS and background task)
+    # 1. Read the full file content
     image_bytes = await file.read()
     
     # 2. Generate required metadata quickly
@@ -247,22 +202,33 @@ async def upload_image(
     if lat is None or lon is None:
         raise HTTPException(status_code=400, detail="Location is required.")
     
-    # 4. Schedule the slow task and return immediately (FAST REPLY)
-    background_tasks.add_task(
-        execute_full_analysis, 
-        image_bytes, 
-        lat, 
-        lon, 
-        image_filename, 
-        content_type,
-        "Image"
-    )
+    # 4. Upload file to S3 (BLOCKING I/O)
+    media_key = await upload_file_to_s3(image_bytes, image_filename, content_type)
 
-    # 5. Return success response immediately (Server replies in milliseconds!)
+    # 5. Run Detection Model (BLOCKING CPU/ML)
+    detection_result = run_pothole_detection_image(image_bytes)
+
+    # 6. Save the record
+    record = {
+        "latitude": lat,
+        "longitude": lon,
+        "pothole_found": detection_result["pothole_found"],
+        "confidence": detection_result["confidence"],
+        "media_name": image_filename,
+        "media_type": "Image",
+        "media_key": media_key, 
+        "detection_count": detection_result["detection_count"],
+        "date_time": datetime.datetime.now().isoformat()
+    }
+    
+    records = load_records()
+    records.append(record)
+    save_records(records)
+
+    # 7. Return the final result
     return {
-        "message": "Report received. Analysis is starting in the background (HTTP 202).",
-        "status": "PROCESSING",
-        "media_name": image_filename
+        "message": "Image analyzed and uploaded to S3 successfully!",
+        "result": record
     }
 
 
@@ -272,10 +238,8 @@ async def upload_video(
     manual_lat: Optional[float] = Form(None), 
     manual_lon: Optional[float] = Form(None)
 ):
-    """
-    NOTE: This route remains synchronous and slow. To make it fast, 
-    it requires the same BackgroundTasks implementation as /api/upload/image.
-    """
+    """Handles video upload, detection, and S3 upload."""
+    
     if manual_lat is None or manual_lon is None:
         raise HTTPException(status_code=400, detail="Location is required for videos. Please manually enter coordinates.")
 
@@ -285,9 +249,9 @@ async def upload_video(
     content_type = file.content_type
     
     # 1. Upload original file to S3
-    original_media_key = upload_file_to_s3(video_bytes, video_filename, content_type)
+    original_media_key = await upload_file_to_s3(video_bytes, video_filename, content_type)
     
-    # 2. Save video locally for processing (Necessary for YOLO's file-based video processing)
+    # 2. Save video locally for processing 
     temp_input_path = os.path.join("/tmp", video_filename)
     with open(temp_input_path, "wb") as buffer:
         buffer.write(video_bytes)
@@ -309,6 +273,7 @@ async def upload_video(
             verbose=False
         )
         
+        # 4. Upload Processed Video back to S3
         output_files = [f for f in os.listdir(temp_output_dir) if f.endswith('.mp4') or f.endswith('.avi')]
         if not output_files:
             raise Exception("YOLO saved detections but not the video file.")
@@ -316,10 +281,9 @@ async def upload_video(
         temp_output_path = os.path.join(temp_output_dir, output_files[0])
         processed_filename = f"processed_{video_filename}"
         
-        # 4. Upload Processed Video back to S3
         with open(temp_output_path, "rb") as processed_file:
             processed_bytes = processed_file.read()
-            processed_media_key = upload_file_to_s3(processed_bytes, processed_filename, "video/mp4")
+            processed_media_key = await upload_file_to_s3(processed_bytes, processed_filename, "video/mp4")
         
         total_detections = sum(len(r.boxes) for r in results)
         max_confidence = 1.0 if total_detections > 0 else 0.0
