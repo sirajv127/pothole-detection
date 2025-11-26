@@ -3,8 +3,9 @@ import os
 import datetime
 import random
 from typing import Optional, List
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -18,43 +19,59 @@ from ultralytics import YOLO # Using YOLOv8/v9 library for detection
 
 # --- Configuration & Setup ---
 DB_FILE = "backend/pothole_reports.json"
-WEIGHTS_PATH = "weights/best.pt" 
+WEIGHTS_PATH = "weights/best.pt"  # NOTE: PATH CORRECTION - Assumes Render Root Dir is 'backend'
 
 # Create directories (only needed for the local weights and DB file)
-os.makedirs("backend/weights", exist_ok=True)
+# os.makedirs("backend/weights", exist_ok=True) # NOTE: Removed directory creation here
 
 # S3 Configuration (Reads from Environment Variables)
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "srm-pothole-detection-bucket")
 S3_REGION = os.environ.get("S3_REGION", "ap-south-1")
 
-app = FastAPI(title="Pothole Reporting System (S3 Integrated)")
-
-# Initialize S3 Client (boto3 automatically uses AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY)
+# Global variables for client and model
 s3_client = None
-try:
-    s3_client = boto3.client('s3', region_name=S3_REGION)
-    print("S3 client initialized successfully.")
-except Exception as e:
-    print(f"Error initializing S3 client. Check AWS configuration: {e}")
+model = None
 
-# Model Loading (Loaded once when the server starts)
-try:
-    if os.path.exists(WEIGHTS_PATH):
-        model = YOLO(WEIGHTS_PATH)
-        print(f"Loaded custom YOLO model from: {WEIGHTS_PATH}")
-    else:
-        model = YOLO('yolov8n.pt') 
-        print("WARNING: Custom weights not found. Using default YOLOv8n model.")
+# --- Application Lifespan (for startup/shutdown) ---
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initializes S3 client and loads the YOLO model when the server starts."""
+    global s3_client, model
+
+    # 1. Initialize S3 Client
+    try:
+        s3_client = boto3.client('s3', region_name=S3_REGION)
+        print("S3 client initialized successfully.")
+    except Exception as e:
+        print(f"Error initializing S3 client. Check AWS configuration: {e}")
+        s3_client = None
+
+    # 2. Model Loading (Load the custom weights)
+    try:
+        # NOTE: Using the corrected path "weights/best.pt"
+        if os.path.exists(WEIGHTS_PATH):
+            model = YOLO(WEIGHTS_PATH)
+            print(f"Loaded custom YOLO model from: {WEIGHTS_PATH}")
+        else:
+            # Fallback if custom weights are not found
+            model = YOLO('yolov8n.pt') 
+            print("WARNING: Custom weights not found. Using default YOLOv8n model.")
+            
+    except Exception as e:
+        print(f"Error loading YOLO model: {e}")
+        # Final fallback to a mock model function if YOLO fails
+        class MockResult:
+            def __init__(self, boxes):
+                self.boxes = type('Boxes', (object,), {'conf': np.array([random.uniform(0.7, 0.9)])})
+        model = lambda x, conf, classes, verbose: [MockResult(boxes=None)] if random.random() < 0.3 else [MockResult(boxes=[])]
+        print("Using Mock Detection Model.")
         
-except Exception as e:
-    print(f"Error loading YOLO model: {e}")
-    # Fallback to a mock model function if YOLO fails
-    class MockResult:
-        def __init__(self, boxes):
-            # Mock confidence for a random result
-            self.boxes = type('Boxes', (object,), {'conf': np.array([random.uniform(0.7, 0.9)])})
-    model = lambda x, conf, classes, verbose: [MockResult(boxes=None)] if random.random() < 0.3 else [MockResult(boxes=[])]
-    print("Using Mock Detection Model.")
+    yield
+    # Cleanup on shutdown (optional but good practice)
+    print("Application shutting down.")
+
+app = FastAPI(title="Pothole Reporting System (S3 Integrated)", lifespan=lifespan)
 
 # CORS Middleware for Frontend connection
 app.add_middleware(
@@ -65,18 +82,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Helper Functions (Database & GPS) ---
+# --- Helper Functions (Database, GPS, S3, Detection) ---
 
 def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     """Extracts GPS coordinates (lat, lon) from image bytes (EXIF data)."""
+    # ... (function implementation remains the same) ...
     try:
-        # Load image from bytes (in-memory)
         image = Image.open(io.BytesIO(image_bytes))
         exif_data = image._getexif()
         if not exif_data: return None
 
         def get_decimal_from_dms(dms, ref):
-            # ... (DMS to decimal conversion logic) ...
             degrees = dms[0][0] / dms[0][1]
             minutes = dms[1][0] / dms[1][1] / 60.0
             seconds = dms[2][0] / dms[2][1] / 3600.0
@@ -97,29 +113,31 @@ def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     except Exception:
         return None
 
+
 def load_records() -> List[dict]:
-    # ... (Database logic remains the same) ...
-    if not os.path.exists(DB_FILE) or os.stat(DB_FILE).st_size == 0:
+    # NOTE: DB_FILE path corrected to assume 'backend' is the working directory
+    DB_FILE_RELATIVE = "pothole_reports.json" 
+    if not os.path.exists(DB_FILE_RELATIVE) or os.stat(DB_FILE_RELATIVE).st_size == 0:
         return []
     try:
-        with open(DB_FILE, 'r') as f:
+        with open(DB_FILE_RELATIVE, 'r') as f:
             return json.load(f)
     except json.JSONDecodeError:
         return [] 
 
 def save_records(records: List[dict]):
-    # ... (Database logic remains the same) ...
-    with open(DB_FILE, 'w') as f:
+    # NOTE: DB_FILE path corrected to assume 'backend' is the working directory
+    DB_FILE_RELATIVE = "pothole_reports.json"
+    with open(DB_FILE_RELATIVE, 'w') as f:
         json.dump(records, f, indent=4)
 
-# --- S3 Upload Function ---
 
+# --- NOTE: This function remains async but is called safely by BackgroundTasks ---
 async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
     """Uploads file bytes to S3 and returns the S3 key (path)."""
     if not s3_client:
         raise HTTPException(status_code=500, detail="Cloud storage client not initialized.")
         
-    # The 'Key' is the path/name of the file inside the S3 bucket
     s3_key = f"media/{filename}"
     
     try:
@@ -128,18 +146,17 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str)
             Key=s3_key,
             Body=file_bytes,
             ContentType=content_type
-            # For public-facing media, you might add ACL='public-read' here, 
-            # but it is generally recommended to use private buckets and presigned URLs.
         )
         return s3_key
     except Exception as e:
         print(f"S3 Upload Error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to upload file to cloud storage.")
+        # Note: We do not raise HTTPException here, we handle the error in the caller.
+        raise RuntimeError(f"S3 upload failed: {e}") 
 
-# --- YOLO Detection ---
 
 def run_pothole_detection_image(image_bytes: bytes) -> dict:
     """Runs YOLO inference on a single image."""
+    global model
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -152,7 +169,6 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
         max_confidence = float(results[0].boxes.conf.max())
         is_pothole = True
     else:
-        # If no potholes found, assign a low, random confidence 
         max_confidence = round(random.uniform(0.1, 0.4), 4)
         is_pothole = False
         
@@ -162,59 +178,112 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
         "detection_count": detection_count
     }
 
+
+# --- NEW HELPER FUNCTION FOR BACKGROUND EXECUTION ---
+def execute_full_analysis(
+    image_bytes: bytes, 
+    lat: float, 
+    lon: float, 
+    image_filename: str, 
+    content_type: str,
+    media_type: str
+):
+    """
+    Handles all the slow, CPU-intensive work (YOLO, S3 Upload, DB Save).
+    This function runs in a background thread after the HTTP response is sent.
+    """
+    import asyncio # Needed to run async tasks like S3 upload in a sync context
+    
+    # Get the current event loop for running async tasks
+    loop = asyncio.get_event_loop()
+    
+    try:
+        # 1. Upload file to S3 (Run the async task synchronously using the loop)
+        future = asyncio.run_coroutine_threadsafe(
+            upload_file_to_s3(image_bytes, image_filename, content_type),
+            loop
+        )
+        s3_key = future.result() # Blocks until the upload is complete
+        
+        # 2. Run Detection (SLOW CPU/ML)
+        detection_result = run_pothole_detection_image(image_bytes)
+
+        # 3. Save the final record (SLOW FILE I/O)
+        record = {
+            "latitude": lat,
+            "longitude": lon,
+            "pothole_found": detection_result["pothole_found"],
+            "confidence": detection_result["confidence"],
+            "media_name": image_filename,
+            "media_type": media_type,
+            "media_key": s3_key,
+            "detection_count": detection_result["detection_count"],
+            "date_time": datetime.datetime.now().isoformat()
+        }
+        
+        records = load_records()
+        records.append(record)
+        save_records(records)
+        
+        print(f"Background task SUCCESS: Report for {image_filename} completed and saved to S3.")
+
+    except Exception as e:
+        print(f"Background task FAILED for {image_filename}: {e}")
+        # In a production system, you'd log this failure to a separate system.
+
+
 # --- FastAPI Routes ---
 
 @app.post("/api/upload/image")
 async def upload_image(
     file: UploadFile = File(...),
     manual_lat: Optional[float] = Form(None), 
-    manual_lon: Optional[float] = Form(None)
+    manual_lon: Optional[float] = Form(None),
+    background_tasks: BackgroundTasks # INJECTED DEPENDENCY
 ):
-    """Handles image upload, detection, and S3 upload."""
+    """Handles image upload, schedules detection/upload, and returns instant reply."""
+    
+    # 1. Read the full file content immediately (needed for both S3 upload and detection)
     image_bytes = await file.read()
     
-    # 1. Generate filename
+    # 2. Generate required metadata quickly
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     image_filename = f"{timestamp_str}_{file.filename.replace(' ', '_')}"
+    content_type = file.content_type
     
-    # 2. Get the location (metadata OR manual)
+    # 3. Get the location (metadata OR manual)
     lat, lon = manual_lat, manual_lon
     if lat is None or lon is None:
-        gps_coords = get_gps_from_image(image_bytes) # Read EXIF directly from bytes
+        gps_coords = get_gps_from_image(image_bytes)
         if gps_coords:
             lat, lon = gps_coords
     
     if lat is None or lon is None:
-        raise HTTPException(status_code=400, detail="Location is required. Please manually enter coordinates if the image has no GPS.")
-
-    # 3. Upload file to S3
-    media_key = await upload_file_to_s3(image_bytes, image_filename, file.content_type)
-
-    # 4. Run Detection Model (using the original bytes)
-    detection_result = run_pothole_detection_image(image_bytes)
-
-    # 5. Save the record
-    record = {
-        "latitude": lat,
-        "longitude": lon,
-        "pothole_found": detection_result["pothole_found"],
-        "confidence": detection_result["confidence"],
-        "media_name": image_filename,
-        "media_type": "Image",
-        "media_key": media_key, # Store the S3 path
-        "detection_count": detection_result["detection_count"],
-        "date_time": datetime.datetime.now().isoformat()
-    }
+        raise HTTPException(status_code=400, detail="Location is required.")
     
-    records = load_records()
-    records.append(record)
-    save_records(records)
+    # 4. Schedule the slow task and return immediately
+    background_tasks.add_task(
+        execute_full_analysis, 
+        image_bytes, 
+        lat, 
+        lon, 
+        image_filename, 
+        content_type,
+        "Image"
+    )
 
+    # 5. Return success response immediately (Fast Reply!)
+    # The client will receive this response while the server processes the data.
     return {
-        "message": "Image analyzed and uploaded to S3 successfully!",
-        "result": record
+        "message": "Report received. Analysis is starting in the background (HTTP 202).",
+        "status": "PROCESSING",
+        "media_name": image_filename
     }
 
+
+# NOTE: The /api/upload/video route and the /api/export/excel route remain mostly
+# unchanged as they handle file I/O or administrative tasks, but the video route
+# can also be optimized with BackgroundTasks, similar to the image route.
 
 @app.post("/api/upload/video")
 async def upload_video(
@@ -223,18 +292,21 @@ async def upload_video(
     manual_lon: Optional[float] = Form(None)
 ):
     """Handles video upload, detection, and S3 upload."""
+    # NOTE: For simplicity, this route is left synchronous and slow. 
+    # To make it fast, it requires the same BackgroundTasks logic as above.
+    
     if manual_lat is None or manual_lon is None:
         raise HTTPException(status_code=400, detail="Location is required for videos. Please manually enter coordinates.")
 
     video_bytes = await file.read()
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     video_filename = f"{timestamp_str}_{file.filename.replace(' ', '_')}"
+    content_type = file.content_type
     
     # 1. Upload original file to S3
-    original_media_key = await upload_file_to_s3(video_bytes, video_filename, file.content_type)
+    original_media_key = await upload_file_to_s3(video_bytes, video_filename, content_type)
     
     # 2. Save video locally for processing (Necessary for YOLO's file-based video processing)
-    # This is a temporary file that must be deleted!
     temp_input_path = os.path.join("/tmp", video_filename)
     with open(temp_input_path, "wb") as buffer:
         buffer.write(video_bytes)
@@ -280,7 +352,7 @@ async def upload_video(
     finally:
         # CRITICAL: Clean up temporary local files
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
-        if os.path.exists(temp_output_path): os.remove(temp_output_path)
+        if 'temp_output_path' in locals() and os.path.exists(temp_output_path): os.remove(temp_output_path)
         
     # 5. Save the record
     record = {
@@ -310,6 +382,7 @@ async def upload_video(
 @app.get("/api/export/excel")
 def export_to_excel():
     """Generates and returns an Excel file of all pothole reports."""
+    # ... (function implementation remains the same) ...
     records = load_records()
     if not records:
         raise HTTPException(status_code=404, detail="No records to export.")
