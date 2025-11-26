@@ -16,11 +16,11 @@ import boto3
 import io
 import cv2
 from ultralytics import YOLO # Using YOLOv8/v9 library for detection
-import asyncio # For running async S3 upload in the sync background task
 
 # --- Configuration & Setup ---
-DB_FILE = "pothole_reports.json"
-WEIGHTS_PATH = "weights/best.pt"  # NOTE: Assumes Render Root Dir is 'backend'
+# NOTE: Paths are relative assuming Render's Root Directory is set to 'backend'
+DB_FILE = "pothole_reports.json" 
+WEIGHTS_PATH = "weights/best.pt" 
 
 # S3 Configuration (Reads from Environment Variables)
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "srm-pothole-detection-bucket")
@@ -64,7 +64,6 @@ async def lifespan(app: FastAPI):
         print("Using Mock Detection Model.")
         
     yield
-    # Cleanup on shutdown (optional but good practice)
     print("Application shutting down.")
 
 app = FastAPI(title="Pothole Reporting System (S3 Integrated)", lifespan=lifespan)
@@ -78,10 +77,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Helper Functions (Database, GPS, S3, Detection) ---
+# --- Core I/O and Processing Functions (Used by Background Task) ---
 
 def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     """Extracts GPS coordinates (lat, lon) from image bytes (EXIF data)."""
+    # ... (Implementation is correct and left unchanged) ...
     try:
         image = Image.open(io.BytesIO(image_bytes))
         exif_data = image._getexif()
@@ -108,9 +108,7 @@ def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     except Exception:
         return None
 
-
 def load_records() -> List[dict]:
-    # NOTE: DB_FILE path corrected to assume 'backend' is the working directory
     DB_FILE_RELATIVE = "pothole_reports.json" 
     if not os.path.exists(DB_FILE_RELATIVE) or os.stat(DB_FILE_RELATIVE).st_size == 0:
         return []
@@ -121,20 +119,21 @@ def load_records() -> List[dict]:
         return [] 
 
 def save_records(records: List[dict]):
-    # NOTE: DB_FILE path corrected to assume 'backend' is the working directory
     DB_FILE_RELATIVE = "pothole_reports.json"
     with open(DB_FILE_RELATIVE, 'w') as f:
         json.dump(records, f, indent=4)
 
 
-async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
-    """Uploads file bytes to S3 and returns the S3 key (path)."""
+# --- S3 Upload Function (CHANGED TO SYNCHRONOUS for background task compatibility) ---
+def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
+    """Uploads file bytes to S3 using blocking boto3 call."""
     if not s3_client:
-        raise HTTPException(status_code=500, detail="Cloud storage client not initialized.")
+        raise RuntimeError("Cloud storage client not initialized.")
         
     s3_key = f"media/{filename}"
     
     try:
+        # Boto3 calls are synchronous and blocking, safe to call here.
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
             Key=s3_key,
@@ -148,7 +147,7 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str)
 
 
 def run_pothole_detection_image(image_bytes: bytes) -> dict:
-    """Runs YOLO inference on a single image."""
+    """Runs YOLO inference on a single image (CPU-bound/SLOW)."""
     global model
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -181,26 +180,18 @@ def execute_full_analysis(
     media_type: str
 ):
     """
-    Handles all the slow, CPU-intensive work (YOLO, S3 Upload, DB Save).
-    This function runs in a background thread after the HTTP response is sent.
+    Handles all the slow, CPU-intensive work in a separate thread.
+    This function blocks the thread but ensures the main web server remains responsive.
     """
-    import asyncio 
-    
-    # Get the current event loop for running async tasks like S3 upload
-    loop = asyncio.get_event_loop()
     
     try:
-        # 1. Upload file to S3 (Run the async task synchronously using the loop)
-        future = asyncio.run_coroutine_threadsafe(
-            upload_file_to_s3(image_bytes, image_filename, content_type),
-            loop
-        )
-        s3_key = future.result() # Blocks until the upload is complete
+        # 1. Upload file to S3 (SLOW I/O)
+        s3_key = upload_file_to_s3(image_bytes, image_filename, content_type) 
         
         # 2. Run Detection (SLOW CPU/ML)
         detection_result = run_pothole_detection_image(image_bytes)
 
-        # 3. Save the final record (SLOW FILE I/O)
+        # 3. Save the final record (DB Save)
         record = {
             "latitude": lat,
             "longitude": lon,
@@ -221,25 +212,24 @@ def execute_full_analysis(
 
     except Exception as e:
         print(f"Background task FAILED for {image_filename}: {e}")
-        # Log the failure to a database/external service
+        # This failure won't interrupt the user, but it's logged for maintenance.
 
 
-# --- FastAPI Routes (Only the Image route is optimized for fast reply) ---
+# --- FastAPI Routes ---
 
 @app.post("/api/upload/image")
 async def upload_image(
-    # 1. Place 'background_tasks' before parameters with default values
-    background_tasks: BackgroundTasks,         # NO default value
-    file: UploadFile = File(...),              # Default value (Form)
-    manual_lat: Optional[float] = Form(None),  # Default value (Form)
-    manual_lon: Optional[float] = Form(None)   # Default value (Form)
+    # FIXED ORDER: Parameters without default values must come first
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),              
+    manual_lat: Optional[float] = Form(None), 
+    manual_lon: Optional[float] = Form(None)   
 ):
     """
     Handles image upload, schedules detection/upload, and returns instant reply.
-    The fast reply is achieved by offloading the slow work to BackgroundTasks.
     """
     
-    # 1. Read the full file content immediately (needed to pass to background task)
+    # 1. Read the full file content immediately (needed for both GPS and background task)
     image_bytes = await file.read()
     
     # 2. Generate required metadata quickly
@@ -268,7 +258,7 @@ async def upload_image(
         "Image"
     )
 
-    # 5. Return success response immediately (Server will reply in milliseconds!)
+    # 5. Return success response immediately (Server replies in milliseconds!)
     return {
         "message": "Report received. Analysis is starting in the background (HTTP 202).",
         "status": "PROCESSING",
@@ -282,10 +272,10 @@ async def upload_video(
     manual_lat: Optional[float] = Form(None), 
     manual_lon: Optional[float] = Form(None)
 ):
-    """Handles video upload, detection, and S3 upload."""
-    # NOTE: This route is left synchronous and slow for educational comparison.
-    # It takes 5-6 minutes because it does not use BackgroundTasks.
-    
+    """
+    NOTE: This route remains synchronous and slow. To make it fast, 
+    it requires the same BackgroundTasks implementation as /api/upload/image.
+    """
     if manual_lat is None or manual_lon is None:
         raise HTTPException(status_code=400, detail="Location is required for videos. Please manually enter coordinates.")
 
@@ -295,7 +285,7 @@ async def upload_video(
     content_type = file.content_type
     
     # 1. Upload original file to S3
-    original_media_key = await upload_file_to_s3(video_bytes, video_filename, content_type)
+    original_media_key = upload_file_to_s3(video_bytes, video_filename, content_type)
     
     # 2. Save video locally for processing (Necessary for YOLO's file-based video processing)
     temp_input_path = os.path.join("/tmp", video_filename)
@@ -329,7 +319,7 @@ async def upload_video(
         # 4. Upload Processed Video back to S3
         with open(temp_output_path, "rb") as processed_file:
             processed_bytes = processed_file.read()
-            processed_media_key = await upload_file_to_s3(processed_bytes, processed_filename, "video/mp4")
+            processed_media_key = upload_file_to_s3(processed_bytes, processed_filename, "video/mp4")
         
         total_detections = sum(len(r.boxes) for r in results)
         max_confidence = 1.0 if total_detections > 0 else 0.0
@@ -350,7 +340,7 @@ async def upload_video(
         "media_name": video_filename,
         "media_type": "Video",
         "media_key": original_media_key,
-        "processed_media_key": processed_media_key, # Link to the annotated video
+        "processed_media_key": processed_media_key,
         "detection_count": total_detections,
         "date_time": datetime.datetime.now().isoformat()
     }
