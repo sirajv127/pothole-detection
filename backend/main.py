@@ -16,13 +16,11 @@ import boto3
 import io
 import cv2
 from ultralytics import YOLO # Using YOLOv8/v9 library for detection
+import asyncio # For running async S3 upload in the sync background task
 
 # --- Configuration & Setup ---
-DB_FILE = "backend/pothole_reports.json"
-WEIGHTS_PATH = "weights/best.pt"  # NOTE: PATH CORRECTION - Assumes Render Root Dir is 'backend'
-
-# Create directories (only needed for the local weights and DB file)
-# os.makedirs("backend/weights", exist_ok=True) # NOTE: Removed directory creation here
+DB_FILE = "pothole_reports.json"
+WEIGHTS_PATH = "weights/best.pt"  # NOTE: Assumes Render Root Dir is 'backend'
 
 # S3 Configuration (Reads from Environment Variables)
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "srm-pothole-detection-bucket")
@@ -49,12 +47,10 @@ async def lifespan(app: FastAPI):
 
     # 2. Model Loading (Load the custom weights)
     try:
-        # NOTE: Using the corrected path "weights/best.pt"
         if os.path.exists(WEIGHTS_PATH):
             model = YOLO(WEIGHTS_PATH)
             print(f"Loaded custom YOLO model from: {WEIGHTS_PATH}")
         else:
-            # Fallback if custom weights are not found
             model = YOLO('yolov8n.pt') 
             print("WARNING: Custom weights not found. Using default YOLOv8n model.")
             
@@ -86,7 +82,6 @@ app.add_middleware(
 
 def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     """Extracts GPS coordinates (lat, lon) from image bytes (EXIF data)."""
-    # ... (function implementation remains the same) ...
     try:
         image = Image.open(io.BytesIO(image_bytes))
         exif_data = image._getexif()
@@ -132,7 +127,6 @@ def save_records(records: List[dict]):
         json.dump(records, f, indent=4)
 
 
-# --- NOTE: This function remains async but is called safely by BackgroundTasks ---
 async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
     """Uploads file bytes to S3 and returns the S3 key (path)."""
     if not s3_client:
@@ -150,7 +144,6 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str)
         return s3_key
     except Exception as e:
         print(f"S3 Upload Error: {e}")
-        # Note: We do not raise HTTPException here, we handle the error in the caller.
         raise RuntimeError(f"S3 upload failed: {e}") 
 
 
@@ -160,7 +153,6 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # YOLO inference. conf=0.5 (min confidence), classes=0 (assuming '0' is the pothole class ID)
     results = model.predict(img, conf=0.5, classes=0, verbose=False) 
     
     detection_count = len(results[0].boxes)
@@ -179,7 +171,7 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
     }
 
 
-# --- NEW HELPER FUNCTION FOR BACKGROUND EXECUTION ---
+# --- NEW HELPER FUNCTION FOR BACKGROUND EXECUTION (HOLDS ALL SLOW WORK) ---
 def execute_full_analysis(
     image_bytes: bytes, 
     lat: float, 
@@ -192,9 +184,9 @@ def execute_full_analysis(
     Handles all the slow, CPU-intensive work (YOLO, S3 Upload, DB Save).
     This function runs in a background thread after the HTTP response is sent.
     """
-    import asyncio # Needed to run async tasks like S3 upload in a sync context
+    import asyncio 
     
-    # Get the current event loop for running async tasks
+    # Get the current event loop for running async tasks like S3 upload
     loop = asyncio.get_event_loop()
     
     try:
@@ -229,21 +221,25 @@ def execute_full_analysis(
 
     except Exception as e:
         print(f"Background task FAILED for {image_filename}: {e}")
-        # In a production system, you'd log this failure to a separate system.
+        # Log the failure to a database/external service
 
 
-# --- FastAPI Routes ---
+# --- FastAPI Routes (Only the Image route is optimized for fast reply) ---
 
 @app.post("/api/upload/image")
 async def upload_image(
-    file: UploadFile = File(...),
-    manual_lat: Optional[float] = Form(None), 
-    manual_lon: Optional[float] = Form(None),
-    background_tasks: BackgroundTasks # INJECTED DEPENDENCY
+    # 1. Place 'background_tasks' before parameters with default values
+    background_tasks: BackgroundTasks,         # NO default value
+    file: UploadFile = File(...),              # Default value (Form)
+    manual_lat: Optional[float] = Form(None),  # Default value (Form)
+    manual_lon: Optional[float] = Form(None)   # Default value (Form)
 ):
-    """Handles image upload, schedules detection/upload, and returns instant reply."""
+    """
+    Handles image upload, schedules detection/upload, and returns instant reply.
+    The fast reply is achieved by offloading the slow work to BackgroundTasks.
+    """
     
-    # 1. Read the full file content immediately (needed for both S3 upload and detection)
+    # 1. Read the full file content immediately (needed to pass to background task)
     image_bytes = await file.read()
     
     # 2. Generate required metadata quickly
@@ -261,7 +257,7 @@ async def upload_image(
     if lat is None or lon is None:
         raise HTTPException(status_code=400, detail="Location is required.")
     
-    # 4. Schedule the slow task and return immediately
+    # 4. Schedule the slow task and return immediately (FAST REPLY)
     background_tasks.add_task(
         execute_full_analysis, 
         image_bytes, 
@@ -272,18 +268,13 @@ async def upload_image(
         "Image"
     )
 
-    # 5. Return success response immediately (Fast Reply!)
-    # The client will receive this response while the server processes the data.
+    # 5. Return success response immediately (Server will reply in milliseconds!)
     return {
         "message": "Report received. Analysis is starting in the background (HTTP 202).",
         "status": "PROCESSING",
         "media_name": image_filename
     }
 
-
-# NOTE: The /api/upload/video route and the /api/export/excel route remain mostly
-# unchanged as they handle file I/O or administrative tasks, but the video route
-# can also be optimized with BackgroundTasks, similar to the image route.
 
 @app.post("/api/upload/video")
 async def upload_video(
@@ -292,8 +283,8 @@ async def upload_video(
     manual_lon: Optional[float] = Form(None)
 ):
     """Handles video upload, detection, and S3 upload."""
-    # NOTE: For simplicity, this route is left synchronous and slow. 
-    # To make it fast, it requires the same BackgroundTasks logic as above.
+    # NOTE: This route is left synchronous and slow for educational comparison.
+    # It takes 5-6 minutes because it does not use BackgroundTasks.
     
     if manual_lat is None or manual_lon is None:
         raise HTTPException(status_code=400, detail="Location is required for videos. Please manually enter coordinates.")
@@ -317,7 +308,6 @@ async def upload_video(
     temp_output_dir = os.path.join("/tmp", output_folder_name)
     
     try:
-        # YOLO command to run prediction and save the processed video locally
         results = model.predict(
             source=temp_input_path, 
             save=True, 
@@ -329,7 +319,6 @@ async def upload_video(
             verbose=False
         )
         
-        # Determine the final local path of the processed video file
         output_files = [f for f in os.listdir(temp_output_dir) if f.endswith('.mp4') or f.endswith('.avi')]
         if not output_files:
             raise Exception("YOLO saved detections but not the video file.")
@@ -342,7 +331,6 @@ async def upload_video(
             processed_bytes = processed_file.read()
             processed_media_key = await upload_file_to_s3(processed_bytes, processed_filename, "video/mp4")
         
-        # Summarize detection results
         total_detections = sum(len(r.boxes) for r in results)
         max_confidence = 1.0 if total_detections > 0 else 0.0
         
@@ -350,7 +338,6 @@ async def upload_video(
         print(f"Video processing failed: {e}")
         raise HTTPException(status_code=500, detail=f"Video analysis failed on the server: {e}")
     finally:
-        # CRITICAL: Clean up temporary local files
         if os.path.exists(temp_input_path): os.remove(temp_input_path)
         if 'temp_output_path' in locals() and os.path.exists(temp_output_path): os.remove(temp_output_path)
         
@@ -382,14 +369,12 @@ async def upload_video(
 @app.get("/api/export/excel")
 def export_to_excel():
     """Generates and returns an Excel file of all pothole reports."""
-    # ... (function implementation remains the same) ...
     records = load_records()
     if not records:
         raise HTTPException(status_code=404, detail="No records to export.")
 
     df = pd.DataFrame(records)
 
-    # Format the DataFrame columns
     df = df.rename(columns={
         "latitude": "Latitude",
         "longitude": "Longitude",
