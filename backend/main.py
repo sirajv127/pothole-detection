@@ -317,6 +317,11 @@ async def upload_video(
         "total_detections": total_detections
     }
 
+@app.get("/api/potholes")
+def list_pothole_reports():
+    """Returns a list of all submitted pothole reports (for the Admin Dashboard table)."""
+    return load_records()
+
 # Route to download Excel (Admin)
 @app.get("/api/export/excel")
 def export_to_excel():
