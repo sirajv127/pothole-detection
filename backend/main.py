@@ -81,7 +81,6 @@ app.add_middleware(
 
 def get_gps_from_image(image_bytes: bytes) -> Optional[tuple]:
     """Extracts GPS coordinates (lat, lon) from image bytes (EXIF data)."""
-    # ... (Implementation is correct and left unchanged) ...
     try:
         image = Image.open(io.BytesIO(image_bytes))
         exif_data = image._getexif()
@@ -124,7 +123,7 @@ def save_records(records: List[dict]):
         json.dump(records, f, indent=4)
 
 
-# --- S3 Upload Function (RESTORED TO ASYNCHRONOUS) ---
+# --- S3 Upload Function (ASYNCHRONOUS) ---
 async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str) -> str:
     """Uploads file bytes to S3 using blocking boto3 call."""
     if not s3_client:
@@ -132,8 +131,7 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str)
         
     s3_key = f"media/{filename}"
     
-    # NOTE: Since boto3 is synchronous, FastAPI will run this in a thread pool.
-    # We keep 'async' for FastAPI compatibility in the route.
+    # NOTE: Boto3 is synchronous; FastAPI runs this in a thread pool managed by Uvicorn.
     try:
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
@@ -171,7 +169,7 @@ def run_pothole_detection_image(image_bytes: bytes) -> dict:
     }
 
 
-# --- FastAPI Routes (Restored to Blocking/Synchronous Logic) ---
+# --- FastAPI Routes (SYNCHRONOUS/BLOCKING LOGIC) ---
 
 @app.post("/api/upload/image")
 async def upload_image(
