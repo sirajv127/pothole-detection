@@ -4,93 +4,174 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pothole Reporting System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f4f7f9; }
-        h1 { color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 20px; }
-        label, p, h3 { margin-top: 15px; }
-        input[type="file"], input[type="number"], button { display: block; width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
-        button { background-color: #28a745; color: white; border: none; cursor: pointer; transition: background-color 0.3s; }
-        button:hover:not(:disabled) { background-color: #218838; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
-        .result-box { border: 1px solid #007bff; padding: 20px; margin-top: 25px; background-color: #e9f5ff; border-radius: 6px; }
-        .success { color: #155724; font-weight: bold; }
-        .error { color: #721c24; }
-        #loading { display: none; text-align: center; color: #007bff; font-weight: bold; padding: 10px 0; }
-        .admin-buttons button { width: 49%; }
+        body { font-family: 'Inter', sans-serif; }
+        /* Style for the active tab content */
+        .tab-content.active { display: block; }
+        .tab-content { display: none; }
+        .success-bg { background-color: #d1e7dd; color: #0f5132; }
+        .danger-bg { background-color: #f8d7da; color: #842029; }
     </style>
 </head>
-<body>
-    <h1>Pothole & Road Damage Reporting</h1>
+<body class="bg-gray-50 min-h-screen">
+    <div id="app" class="max-w-6xl mx-auto p-4 sm:p-6">
+        <header class="bg-white shadow-md rounded-lg p-4 mb-6">
+            <h1 class="text-3xl font-extrabold text-blue-700">Road Damage Reporter</h1>
+            <p class="text-gray-500">FastAPI + YOLO + AWS S3 Integrated</p>
+        </header>
 
-    <form id="pothole-form">
-        <h3>1. Upload Media (Image or Video)</h3>
-        <label for="media-file">Choose file (Image or Video):</label>
-        <input type="file" id="media-file" name="file" accept="image/*,video/*" required>
-        
-        <h3>2. Enter Location Details</h3>
-        <p>Coordinates are required:</p>
-        
-        <label for="lat">Latitude:</label>
-        <input type="number" step="0.000001" id="lat" name="manual_lat" placeholder="e.g., 34.0522" required>
-        
-        <label for="lon">Longitude:</label>
-        <input type="number" step="0.000001" id="lon" name="manual_lon" placeholder="e.g., -118.2437" required>
-        
-        <button type="submit" id="submit-btn">Submit Report</button>
-    </form>
-    
-    <p id="loading">Processing media, this may take a moment for videos...</p>
+        <!-- Tab Navigation -->
+        <div class="flex border-b border-gray-300">
+            <button id="tab-report-btn" onclick="showTab('report')" 
+                class="py-3 px-6 text-sm sm:text-base font-medium rounded-t-lg focus:outline-none transition-colors duration-150 bg-blue-600 text-white">
+                Submit New Report
+            </button>
+            <button id="tab-dashboard-btn" onclick="showTab('dashboard')" 
+                class="py-3 px-6 text-sm sm:text-base font-medium rounded-t-lg focus:outline-none transition-colors duration-150 text-gray-700 hover:bg-gray-200">
+                Admin Dashboard (View All)
+            </button>
+        </div>
 
-    <div class="result-box" id="result-box" style="display: none;">
-        <h2>Detection Result Summary</h2>
-        <p id="message"></p>
-        <p><strong>Media Type:</strong> <span id="media-type"></span></p>
-        <p><strong>Location:</strong> <span id="location"></span></p>
-        <p><strong>Pothole Found:</strong> <span id="pothole-status"></span></p>
-        <p><strong>Detection Count:</strong> <span id="detection-count"></span></p>
-        <p><strong>Max Confidence:</strong> <span id="confidence"></span></p>
-    </div>
+        <!-- Report Submission Tab -->
+        <div id="report" class="tab-content active bg-white p-6 rounded-b-lg shadow-lg">
+            <h2 class="text-2xl font-semibold mb-4 text-gray-800">1. Report Road Damage</h2>
+            <form id="pothole-form" class="space-y-4">
+                <div>
+                    <label for="media-file" class="block text-sm font-medium text-gray-700">Upload Media (Image or Video):</label>
+                    <input type="file" id="media-file" name="file" accept="image/*,video/*" required
+                        class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+                </div>
+                
+                <h3 class="text-lg font-medium text-gray-800 pt-2 border-t">2. Location Details (Required)</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label for="lat" class="block text-sm font-medium text-gray-700">Latitude (e.g., 34.0522):</label>
+                        <input type="number" step="0.000001" id="lat" name="manual_lat" placeholder="34.0522" required
+                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border">
+                    </div>
+                    <div>
+                        <label for="lon" class="block text-sm font-medium text-gray-700">Longitude (e.g., -118.2437):</label>
+                        <input type="number" step="0.000001" id="lon" name="manual_lon" placeholder="-118.2437" required
+                            class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-2 border">
+                    </div>
+                </div>
+                
+                <button type="submit" id="submit-btn"
+                    class="w-full py-3 px-4 border border-transparent rounded-md shadow-sm text-base font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition duration-150 ease-in-out">
+                    <span id="button-text">Submit Report & Run Analysis</span>
+                </button>
+            </form>
+            
+            <!-- Result Display -->
+            <div id="status-message" class="mt-6 p-4 text-center text-lg font-semibold rounded-lg shadow-inner bg-yellow-50 text-yellow-800 hidden"></div>
 
-    <hr>
-    <h2>Admin Dashboard</h2>
-    <div class="admin-buttons">
-        <a id="excel-link" href="http://127.0.0.1:8000/api/export/excel" target="_blank">
-            <button>Download All Reports (Excel)</button>
-        </a>
-        <a id="admin-list-link" href="http://127.0.0.1:8000/api/potholes" target="_blank">
-            <button style="background-color: #007bff;">View All Records (JSON)</button>
-        </a>
+            <div id="result-display" class="mt-6 p-6 border border-gray-200 rounded-lg bg-gray-50 hidden">
+                <h3 class="text-xl font-bold mb-3 text-gray-800">Analysis Result</h3>
+                <div class="space-y-2 text-sm">
+                    <p><span class="font-medium">Status:</span> <span id="res-pothole-status" class="font-bold"></span></p>
+                    <p><span class="font-medium">Location:</span> <span id="res-location"></span></p>
+                    <p><span class="font-medium">Media Type:</span> <span id="res-media-type"></span></p>
+                    <p><span class="font-medium">Potholes Found:</span> <span id="res-count"></span></p>
+                    <p><span class="font-medium">Confidence:</span> <span id="res-confidence"></span></p>
+                    <p class="text-sm text-gray-500 mt-2"><span id="res-message"></span></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin Dashboard Tab -->
+        <div id="dashboard" class="tab-content bg-white p-6 rounded-b-lg shadow-lg">
+            <h2 class="text-2xl font-semibold mb-4 text-gray-800">Admin Dashboard: All Reports</h2>
+            <div class="flex justify-between items-center mb-4">
+                <button onclick="fetchReports()" 
+                    class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition duration-150">
+                    Refresh Records
+                </button>
+                <a id="excel-download-link" href="#" target="_blank"
+                    class="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition duration-150 flex items-center">
+                    <svg class="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"></path></svg>
+                    Download Excel Report
+                </a>
+            </div>
+            
+            <p id="dashboard-status" class="text-sm text-gray-600 mb-4">Click "Refresh Records" to load data.</p>
+
+            <div class="overflow-x-auto rounded-lg shadow-md">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Location (Lat/Lon)</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Pothole Found?</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Confidence</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Media File</th>
+                        </tr>
+                    </thead>
+                    <tbody id="reports-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Data rows will be injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <script>
-        const form = document.getElementById('pothole-form');
-        const fileInput = document.getElementById('media-file');
-        const resultBox = document.getElementById('result-box');
-        const submitButton = document.getElementById('submit-btn');
-        const loadingMessage = document.getElementById('loading');
-        
-        // --- IMPORTANT: Change this if deploying to a different URL/port! ---
+        // --- IMPORTANT: Update this URL after deployment! ---
+        // You MUST replace "https://YOUR-RENDER-API-URL.onrender.com" with your actual live URL (e.g., https://pothole-fastapi-service.onrender.com)
         const API_BASE_URL = "https://pothole-fastapi-service.onrender.com"; 
-        // ---------------------------------------------------------------------
+        // ----------------------------------------------------
 
-        form.addEventListener('submit', async (e) => {
+        // Set the Excel Download Link based on the API URL
+        document.getElementById('excel-download-link').href = `${API_BASE_URL}/api/export/excel`;
+
+        // --- Tab Switching Logic ---
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.getElementById(tabId).classList.add('active');
+
+            // Update button styles
+            document.getElementById('tab-report-btn').classList.remove('bg-blue-600', 'text-white', 'text-gray-700', 'hover:bg-gray-200');
+            document.getElementById('tab-dashboard-btn').classList.remove('bg-blue-600', 'text-white', 'text-gray-700', 'hover:bg-gray-200');
+
+            if (tabId === 'report') {
+                document.getElementById('tab-report-btn').classList.add('bg-blue-600', 'text-white');
+                document.getElementById('tab-dashboard-btn').classList.add('text-gray-700', 'hover:bg-gray-200');
+            } else {
+                document.getElementById('tab-dashboard-btn').classList.add('bg-blue-600', 'text-white');
+                document.getElementById('tab-report-btn').classList.add('text-gray-700', 'hover:bg-gray-200');
+                fetchReports(); // Load data when dashboard is selected
+            }
+        }
+
+        // Initialize the report tab view
+        document.addEventListener('DOMContentLoaded', () => {
+            showTab('report');
+        });
+
+        // --- Report Submission Logic ---
+        document.getElementById('pothole-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             
-            const file = fileInput.files[0];
-            if (!file) {
-                alert("Please select a file to upload.");
-                return;
-            }
-
-            // Determine if the file is a video or image based on MIME type
-            const isVideo = file.type.startsWith('video/');
-            const endpoint = isVideo ? '/api/upload/video' : '/api/upload/image';
+            const form = document.getElementById('pothole-form');
+            const statusMessage = document.getElementById('status-message');
+            const submitButton = document.getElementById('submit-btn');
+            const buttonText = document.getElementById('button-text');
+            const resultDisplay = document.getElementById('result-display');
             
             const formData = new FormData(form);
-            resultBox.style.display = 'none';
-            loadingMessage.textContent = isVideo ? "Processing video (YOLO analysis)..." : "Processing image (YOLO analysis)...";
-            loadingMessage.style.display = 'block';
+            const file = document.getElementById('media-file').files[0];
+            const isVideo = file && file.type.startsWith('video/');
+            const endpoint = isVideo ? '/api/upload/video' : '/api/upload/image';
+
+            // Show Loading State
+            resultDisplay.classList.add('hidden');
+            statusMessage.textContent = isVideo ? "Processing video (May take several minutes)..." : "Processing image (Please wait for YOLO analysis)...";
+            statusMessage.classList.remove('hidden', 'success-bg', 'danger-bg');
+            statusMessage.classList.add('bg-yellow-50', 'text-yellow-800');
             submitButton.disabled = true;
+            buttonText.textContent = 'Processing...';
 
             try {
                 const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -106,35 +187,90 @@
 
                 const result = data.result;
                 const isPothole = result.pothole_found;
+                
+                // Update Result Display
+                document.getElementById('res-message').textContent = data.message;
+                document.getElementById('res-media-type').textContent = result.media_type;
+                document.getElementById('res-location').textContent = `${parseFloat(result.latitude).toFixed(6)}, ${parseFloat(result.longitude).toFixed(6)}`;
+                document.getElementById('res-count').textContent = result.detection_count || (isPothole ? '1+' : '0');
+                document.getElementById('res-confidence').textContent = `${(result.confidence * 100).toFixed(2)}%`;
 
-                // Update result box
-                document.getElementById('message').textContent = data.message;
-                document.getElementById('media-type').textContent = result.media_type;
-                document.getElementById('location').textContent = `${parseFloat(result.latitude).toFixed(6)}, ${parseFloat(result.longitude).toFixed(6)}`;
-                
-                const statusElement = document.getElementById('pothole-status');
-                statusElement.textContent = isPothole ? "✅ YES (Damaged Road)" : "❌ NO (Normal Road)";
-                statusElement.className = isPothole ? 'success' : '';
-                
-                document.getElementById('detection-count').textContent = result.detection_count || 0;
-                document.getElementById('confidence').textContent = `${(result.confidence * 100).toFixed(2)}%`;
-                
-                resultBox.style.display = 'block';
-                form.reset(); 
+                const statusElement = document.getElementById('res-pothole-status');
+                statusElement.textContent = isPothole ? "✅ DAMAGED ROAD" : "❌ NORMAL ROAD";
+                statusElement.className = isPothole ? 'text-red-600' : 'text-green-600';
+
+                resultDisplay.classList.remove('hidden');
+                statusMessage.classList.add('hidden');
+                form.reset();
 
             } catch (error) {
-                document.getElementById('message').innerHTML = `<strong>Error:</strong> ${error.message}`;
-                document.getElementById('pothole-status').textContent = '—';
-                document.getElementById('confidence').textContent = '—';
-                document.getElementById('detection-count').textContent = '—';
-                document.getElementById('media-type').textContent = '—';
-                resultBox.style.display = 'block';
-                console.error('Error:', error);
+                statusMessage.textContent = `ERROR: ${error.message}. Please check console and try again.`;
+                statusMessage.classList.remove('bg-yellow-50', 'text-yellow-800');
+                statusMessage.classList.add('danger-bg');
+                statusMessage.classList.remove('hidden');
+                resultDisplay.classList.add('hidden');
+
             } finally {
-                loadingMessage.style.display = 'none';
                 submitButton.disabled = false;
+                buttonText.textContent = 'Submit Report & Run Analysis';
             }
         });
+
+        // --- Admin Dashboard Logic ---
+        async function fetchReports() {
+            const tableBody = document.getElementById('reports-table-body');
+            const statusText = document.getElementById('dashboard-status');
+            tableBody.innerHTML = ''; // Clear existing data
+            statusText.textContent = 'Fetching data from server...';
+
+            try {
+                // The URL below must be correct and accessible from the client's browser
+                const response = await fetch(`${API_BASE_URL}/api/potholes`); 
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch records. Status: ${response.status}`);
+                }
+                const records = await response.json();
+
+                if (records.length === 0) {
+                    statusText.textContent = 'No reports have been submitted yet.';
+                    return;
+                }
+
+                statusText.textContent = `Successfully loaded ${records.length} reports.`;
+                
+                records.sort((a, b) => new Date(b.date_time) - new Date(a.date_time)); // Sort by newest first
+
+                records.forEach(record => {
+                    const isPothole = record.pothole_found;
+                    const rowClass = isPothole ? 'bg-red-50 hover:bg-red-100' : 'bg-green-50 hover:bg-green-100';
+                    const statusText = isPothole ? 'YES 🔴' : 'NO 🟢';
+                    
+                    // NOTE: This link construction assumes the media key is the file path within the S3 bucket
+                    // and that the S3 bucket is publicly accessible via the Render URL base.
+                    // This often requires specific S3 configuration or using pre-signed URLs (Advanced topic).
+                    const mediaLinkUrl = record.media_key 
+                        ? `https://${S3_BUCKET_NAME.split('//')[1].split('/')[0]}/${record.media_key}`
+                        : '#';
+
+                    const row = `
+                        <tr class="${rowClass} transition-colors duration-150">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${new Date(record.date_time).toLocaleString()}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${parseFloat(record.latitude).toFixed(4)}, ${parseFloat(record.longitude).toFixed(4)}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium ${isPothole ? 'text-red-700' : 'text-green-700'}">${statusText}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${(record.confidence * 100).toFixed(2)}%</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-blue-500 hover:text-blue-700">
+                                <a href="${mediaLinkUrl}" target="_blank" class="truncate">${record.media_type}</a>
+                            </td>
+                        </tr>
+                    `;
+                    tableBody.insertAdjacentHTML('beforeend', row);
+                });
+
+            } catch (error) {
+                statusText.textContent = `Error loading reports: ${error.message}`;
+                console.error("Dashboard Fetch Error:", error);
+            }
+        }
     </script>
 </body>
 </html>
