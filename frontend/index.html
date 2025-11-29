@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pothole Reporting System</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; background-color: #f4f7f9; }
+        h1 { color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 20px; }
+        label, p, h3 { margin-top: 15px; }
+        input[type="file"], input[type="number"], button { display: block; width: 100%; padding: 12px; margin-bottom: 15px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background-color: #28a745; color: white; border: none; cursor: pointer; transition: background-color 0.3s; }
+        button:hover:not(:disabled) { background-color: #218838; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .result-box { border: 1px solid #007bff; padding: 20px; margin-top: 25px; background-color: #e9f5ff; border-radius: 6px; }
+        .success { color: #155724; font-weight: bold; }
+        .error { color: #721c24; }
+        #loading { display: none; text-align: center; color: #007bff; font-weight: bold; padding: 10px 0; }
+        .admin-buttons button { width: 49%; }
+    </style>
+</head>
+<body>
+    <h1>Pothole & Road Damage Reporting</h1>
+
+    <form id="pothole-form">
+        <h3>1. Upload Media (Image or Video)</h3>
+        <label for="media-file">Choose file (Image or Video):</label>
+        <input type="file" id="media-file" name="file" accept="image/*,video/*" required>
+        
+        <h3>2. Enter Location Details</h3>
+        <p>Coordinates are required:</p>
+        
+        <label for="lat">Latitude:</label>
+        <input type="number" step="0.000001" id="lat" name="manual_lat" placeholder="e.g., 34.0522" required>
+        
+        <label for="lon">Longitude:</label>
+        <input type="number" step="0.000001" id="lon" name="manual_lon" placeholder="e.g., -118.2437" required>
+        
+        <button type="submit" id="submit-btn">Submit Report</button>
+    </form>
+    
+    <p id="loading">Processing media, this may take a moment for videos...</p>
+
+    <div class="result-box" id="result-box" style="display: none;">
+        <h2>Detection Result Summary</h2>
+        <p id="message"></p>
+        <p><strong>Media Type:</strong> <span id="media-type"></span></p>
+        <p><strong>Location:</strong> <span id="location"></span></p>
+        <p><strong>Pothole Found:</strong> <span id="pothole-status"></span></p>
+        <p><strong>Detection Count:</strong> <span id="detection-count"></span></p>
+        <p><strong>Max Confidence:</strong> <span id="confidence"></span></p>
+    </div>
+
+    <hr>
+    <h2>Admin Dashboard</h2>
+    <div class="admin-buttons">
+        <a id="excel-link" href="http://127.0.0.1:8000/api/export/excel" target="_blank">
+            <button>Download All Reports (Excel)</button>
+        </a>
+        <a id="admin-list-link" href="http://127.0.0.1:8000/api/potholes" target="_blank">
+            <button style="background-color: #007bff;">View All Records (JSON)</button>
+        </a>
+    </div>
+
+    <script>
+        const form = document.getElementById('pothole-form');
+        const fileInput = document.getElementById('media-file');
+        const resultBox = document.getElementById('result-box');
+        const submitButton = document.getElementById('submit-btn');
+        const loadingMessage = document.getElementById('loading');
+        
+        // --- IMPORTANT: Change this if deploying to a different URL/port! ---
+        const API_BASE_URL = "https://pothole-fastapi-service.onrender.com"; 
+        // ---------------------------------------------------------------------
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const file = fileInput.files[0];
+            if (!file) {
+                alert("Please select a file to upload.");
+                return;
+            }
+
+            // Determine if the file is a video or image based on MIME type
+            const isVideo = file.type.startsWith('video/');
+            const endpoint = isVideo ? '/api/upload/video' : '/api/upload/image';
+            
+            const formData = new FormData(form);
+            resultBox.style.display = 'none';
+            loadingMessage.textContent = isVideo ? "Processing video (YOLO analysis)..." : "Processing image (YOLO analysis)...";
+            loadingMessage.style.display = 'block';
+            submitButton.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || "Upload failed.");
+                }
+
+                const result = data.result;
+                const isPothole = result.pothole_found;
+
+                // Update result box
+                document.getElementById('message').textContent = data.message;
+                document.getElementById('media-type').textContent = result.media_type;
+                document.getElementById('location').textContent = `${parseFloat(result.latitude).toFixed(6)}, ${parseFloat(result.longitude).toFixed(6)}`;
+                
+                const statusElement = document.getElementById('pothole-status');
+                statusElement.textContent = isPothole ? "✅ YES (Damaged Road)" : "❌ NO (Normal Road)";
+                statusElement.className = isPothole ? 'success' : '';
+                
+                document.getElementById('detection-count').textContent = result.detection_count || 0;
+                document.getElementById('confidence').textContent = `${(result.confidence * 100).toFixed(2)}%`;
+                
+                resultBox.style.display = 'block';
+                form.reset(); 
+
+            } catch (error) {
+                document.getElementById('message').innerHTML = `<strong>Error:</strong> ${error.message}`;
+                document.getElementById('pothole-status').textContent = '—';
+                document.getElementById('confidence').textContent = '—';
+                document.getElementById('detection-count').textContent = '—';
+                document.getElementById('media-type').textContent = '—';
+                resultBox.style.display = 'block';
+                console.error('Error:', error);
+            } finally {
+                loadingMessage.style.display = 'none';
+                submitButton.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
