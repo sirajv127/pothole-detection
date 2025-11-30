@@ -131,7 +131,6 @@ async def upload_file_to_s3(file_bytes: bytes, filename: str, content_type: str)
         
     s3_key = f"media/{filename}"
     
-    # NOTE: Boto3 is synchronous; FastAPI runs this in a thread pool managed by Uvicorn.
     try:
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
@@ -317,12 +316,14 @@ async def upload_video(
         "total_detections": total_detections
     }
 
+# --- MISSING ADMIN DASHBOARD ROUTES ADDED HERE ---
+
 @app.get("/api/potholes")
 def list_pothole_reports():
     """Returns a list of all submitted pothole reports (for the Admin Dashboard table)."""
+    # NOTE: This endpoint is called by the frontend to populate the dashboard.
     return load_records()
 
-# Route to download Excel (Admin)
 @app.get("/api/export/excel")
 def export_to_excel():
     """Generates and returns an Excel file of all pothole reports."""

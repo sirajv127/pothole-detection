@@ -9,3 +9,5 @@ numpy
 opencv-python-headless
 ultralytics
 boto3
+psycopg2-binary
+sqlalchemy
