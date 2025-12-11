@@ -68,7 +68,7 @@ Inside `backend/.env`:
 # --- AWS S3 ---
 AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID"
 AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_ACCESS_KEY"
-S3_BUCKET_NAME="srm-pothole-detection-bucket"
+S3_BUCKET_NAME="AWS_BUCKET_NAME"
 S3_REGION="ap-south-1"
 
 # --- AWS RDS ---
